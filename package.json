@@ -28,6 +28,7 @@
     "discord-api-types": "^0.37.70",
     "ws": "^8.16.0",
     "lowdb": "^1.0.0"
+    "discord-player-youtubei": "^1.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
