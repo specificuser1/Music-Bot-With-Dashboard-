@@ -1,175 +1,166 @@
-const Database = require('better-sqlite3');
+const low = require('lowdb');
+const FileSync = require('lowdb/adapters/FileSync');
 const path = require('path');
 
 class MusicBotDB {
     constructor() {
-        this.db = new Database(path.join(__dirname, '..', 'data.db'));
+        const adapter = new FileSync(path.join(__dirname, '..', 'db.json'));
+        this.db = low(adapter);
         this.initialize();
     }
 
     initialize() {
-        // Guilds configuration table
-        this.db.exec(`
-            CREATE TABLE IF NOT EXISTS guilds (
-                guild_id TEXT PRIMARY KEY,
-                prefix TEXT DEFAULT '!',
-                dj_role TEXT,
-                volume INTEGER DEFAULT 50,
-                announce_songs INTEGER DEFAULT 1,
-                created_at INTEGER DEFAULT (strftime('%s', 'now'))
-            )
-        `);
-
-        // Queue history table
-        this.db.exec(`
-            CREATE TABLE IF NOT EXISTS queue_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                track_title TEXT NOT NULL,
-                track_url TEXT,
-                played_at INTEGER DEFAULT (strftime('%s', 'now'))
-            )
-        `);
-
-        // Playlists table
-        this.db.exec(`
-            CREATE TABLE IF NOT EXISTS playlists (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                created_at INTEGER DEFAULT (strftime('%s', 'now'))
-            )
-        `);
-
-        // Playlist tracks table
-        this.db.exec(`
-            CREATE TABLE IF NOT EXISTS playlist_tracks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                playlist_id INTEGER NOT NULL,
-                track_title TEXT NOT NULL,
-                track_url TEXT NOT NULL,
-                added_at INTEGER DEFAULT (strftime('%s', 'now')),
-                FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
-            )
-        `);
+        // Set defaults
+        this.db.defaults({
+            guilds: {},
+            history: [],
+            playlists: [],
+            playlistTracks: []
+        }).write();
 
         console.log('✅ Database initialized');
     }
 
     // Guild Settings
     getGuild(guildId) {
-        const stmt = this.db.prepare('SELECT * FROM guilds WHERE guild_id = ?');
-        let guild = stmt.get(guildId);
+        let guild = this.db.get('guilds').get(guildId).value();
         
         if (!guild) {
-            const insert = this.db.prepare('INSERT INTO guilds (guild_id) VALUES (?)');
-            insert.run(guildId);
-            guild = stmt.get(guildId);
+            const newGuild = {
+                guild_id: guildId,
+                prefix: '!',
+                dj_role: null,
+                volume: 50,
+                announce_songs: 1,
+                created_at: Math.floor(Date.now() / 1000)
+            };
+            this.db.get('guilds').set(guildId, newGuild).write();
+            guild = newGuild;
         }
         
         return guild;
     }
 
     updateGuild(guildId, settings) {
-        const fields = [];
-        const values = [];
-        
-        if (settings.prefix !== undefined) {
-            fields.push('prefix = ?');
-            values.push(settings.prefix);
-        }
-        if (settings.dj_role !== undefined) {
-            fields.push('dj_role = ?');
-            values.push(settings.dj_role);
-        }
-        if (settings.volume !== undefined) {
-            fields.push('volume = ?');
-            values.push(settings.volume);
-        }
-        if (settings.announce_songs !== undefined) {
-            fields.push('announce_songs = ?');
-            values.push(settings.announce_songs);
-        }
-        
-        values.push(guildId);
-        
-        const stmt = this.db.prepare(
-            `UPDATE guilds SET ${fields.join(', ')} WHERE guild_id = ?`
-        );
-        return stmt.run(...values);
+        const current = this.getGuild(guildId);
+        const updated = { ...current, ...settings };
+        this.db.get('guilds').set(guildId, updated).write();
+        return { changes: 1 };
     }
 
     // Queue History
     addToHistory(guildId, userId, trackTitle, trackUrl) {
-        const stmt = this.db.prepare(
-            'INSERT INTO queue_history (guild_id, user_id, track_title, track_url) VALUES (?, ?, ?, ?)'
-        );
-        return stmt.run(guildId, userId, trackTitle, trackUrl);
+        this.db.get('history')
+            .push({
+                id: Date.now(),
+                guild_id: guildId,
+                user_id: userId,
+                track_title: trackTitle,
+                track_url: trackUrl,
+                played_at: Math.floor(Date.now() / 1000)
+            })
+            .write();
+        return { changes: 1 };
     }
 
     getHistory(guildId, limit = 20) {
-        const stmt = this.db.prepare(
-            'SELECT * FROM queue_history WHERE guild_id = ? ORDER BY played_at DESC LIMIT ?'
-        );
-        return stmt.all(guildId, limit);
+        return this.db.get('history')
+            .filter({ guild_id: guildId })
+            .orderBy(['played_at'], ['desc'])
+            .take(limit)
+            .value();
     }
 
     // Playlists
     createPlaylist(userId, name) {
-        const stmt = this.db.prepare('INSERT INTO playlists (user_id, name) VALUES (?, ?)');
-        const result = stmt.run(userId, name);
-        return result.lastInsertRowid;
+        const id = Date.now();
+        this.db.get('playlists')
+            .push({
+                id,
+                user_id: userId,
+                name,
+                created_at: Math.floor(Date.now() / 1000)
+            })
+            .write();
+        return id;
     }
 
     getUserPlaylists(userId) {
-        const stmt = this.db.prepare('SELECT * FROM playlists WHERE user_id = ? ORDER BY created_at DESC');
-        return stmt.all(userId);
+        return this.db.get('playlists')
+            .filter({ user_id: userId })
+            .orderBy(['created_at'], ['desc'])
+            .value();
     }
 
     getPlaylist(playlistId) {
-        const stmt = this.db.prepare('SELECT * FROM playlists WHERE id = ?');
-        return stmt.get(playlistId);
+        return this.db.get('playlists')
+            .find({ id: playlistId })
+            .value();
     }
 
     deletePlaylist(playlistId) {
-        const stmt = this.db.prepare('DELETE FROM playlists WHERE id = ?');
-        return stmt.run(playlistId);
+        this.db.get('playlists')
+            .remove({ id: playlistId })
+            .write();
+        return { changes: 1 };
     }
 
     // Playlist Tracks
     addTrackToPlaylist(playlistId, trackTitle, trackUrl) {
-        const stmt = this.db.prepare(
-            'INSERT INTO playlist_tracks (playlist_id, track_title, track_url) VALUES (?, ?, ?)'
-        );
-        return stmt.run(playlistId, trackTitle, trackUrl);
+        this.db.get('playlistTracks')
+            .push({
+                id: Date.now(),
+                playlist_id: playlistId,
+                track_title: trackTitle,
+                track_url: trackUrl,
+                added_at: Math.floor(Date.now() / 1000)
+            })
+            .write();
+        return { changes: 1 };
     }
 
     getPlaylistTracks(playlistId) {
-        const stmt = this.db.prepare('SELECT * FROM playlist_tracks WHERE playlist_id = ? ORDER BY added_at');
-        return stmt.all(playlistId);
+        return this.db.get('playlistTracks')
+            .filter({ playlist_id: playlistId })
+            .orderBy(['added_at'], ['asc'])
+            .value();
     }
 
     removeTrackFromPlaylist(trackId) {
-        const stmt = this.db.prepare('DELETE FROM playlist_tracks WHERE id = ?');
-        return stmt.run(trackId);
+        this.db.get('playlistTracks')
+            .remove({ id: trackId })
+            .write();
+        return { changes: 1 };
     }
 
     // Stats
     getGuildStats(guildId) {
-        const totalPlayed = this.db.prepare('SELECT COUNT(*) as count FROM queue_history WHERE guild_id = ?').get(guildId);
-        const topUsers = this.db.prepare(
-            'SELECT user_id, COUNT(*) as count FROM queue_history WHERE guild_id = ? GROUP BY user_id ORDER BY count DESC LIMIT 5'
-        ).all(guildId);
+        const history = this.db.get('history')
+            .filter({ guild_id: guildId })
+            .value();
+
+        const totalPlayed = history.length;
+        
+        // Count songs per user
+        const userCounts = {};
+        history.forEach(item => {
+            userCounts[item.user_id] = (userCounts[item.user_id] || 0) + 1;
+        });
+
+        // Get top 5 users
+        const topUsers = Object.entries(userCounts)
+            .map(([user_id, count]) => ({ user_id, count }))
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 5);
         
         return {
-            totalPlayed: totalPlayed.count,
+            totalPlayed,
             topUsers
         };
     }
 
     close() {
-        this.db.close();
+        // LowDB doesn't need explicit close
     }
 }
 
